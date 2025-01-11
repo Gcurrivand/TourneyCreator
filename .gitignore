@@ -1,3 +1,5 @@
-
+.env
 .codegpt
-tournament.db
+/tournament.db
+/tournament.db-shm
+/tournament.db-wal
