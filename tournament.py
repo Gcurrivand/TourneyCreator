@@ -755,7 +755,7 @@ class Tournament:
             # Get matches
             print(f"yolo: {username}")
             try:
-                player_id = player_id.replace('-', '')
+                #player_id = player_id.replace('-', '')
                 tournament_matches = []
                 current_page = 1
                 print(f"number_of_games: {number_of_games}")
