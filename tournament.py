@@ -732,6 +732,7 @@ class Tournament:
                 try:
                     start_timestamp = datetime.strptime(start_date, "%Y-%m-%d %H:%M:%S").timestamp()
                 except ValueError:
+                    print(f"Invalid start date format: {start_date}")
                     return False, f"Invalid start date format: {start_date}"
                 
             if end_date:
@@ -741,6 +742,7 @@ class Tournament:
                     try:
                         end_timestamp = datetime.strptime(end_date, "%Y-%m-%d %H:%M:%S").timestamp()
                     except ValueError:
+                        print(f"Invalid end date format: {end_date}")
                         return False, f"Invalid end date format: {end_date}"
             else:
                 end_timestamp = datetime.now().timestamp()
@@ -751,6 +753,7 @@ class Tournament:
             #    return False, "Could not fetch player ID"
             
             # Get matches
+            print(f"yolo: {username}")
             try:
                 player_id = player_id.replace('-', '')
                 tournament_matches = []
