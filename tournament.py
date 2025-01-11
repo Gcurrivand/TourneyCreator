@@ -744,16 +744,18 @@ class Tournament:
             else:
                 end_timestamp = datetime.now().timestamp()
             
+            print(f"username: {username}")
             player_id = self.get_player_id(username)
             if not player_id:
                 return False, "Could not fetch player ID"
             
+            print(f"player_id: {player_id}")
             # Get matches
             try:
                 player_id = player_id.replace('-', '')
                 tournament_matches = []
                 current_page = 1
-                
+                print(f"number_of_games: {number_of_games}")
                 while len(tournament_matches) < number_of_games:
                     print(f"https://supervive.op.gg/api/players/{player_id}/matches?page={current_page}")
                     response = requests.get(f"https://supervive.op.gg/api/players/{player_id}/matches?page={current_page}")
