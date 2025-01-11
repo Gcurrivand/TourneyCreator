@@ -696,7 +696,7 @@ class Tournament:
 
     def get_player_id(self, username):
         formatted_username = f"{username.replace('#', '-')}"
-        
+        print(f"formatted_username: {formatted_username}")
         try:
             response = requests.get(f"https://supervive.io/api/player/{formatted_username}.json")
             if response.status_code == 200:
@@ -747,6 +747,7 @@ class Tournament:
             print(f"username: {username}")
             player_id = self.get_player_id(username)
             if not player_id:
+                print("player_id not found")
                 return False, "Could not fetch player ID"
             
             print(f"player_id: {player_id}")
