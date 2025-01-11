@@ -701,6 +701,7 @@ class Tournament:
             response = requests.get(f"https://supervive.io/api/player/{formatted_username}.json")
             if response.status_code == 200:
                 data = response.json()
+                print(f"data: {data}")
                 return data.get('id')
         except Exception as e:
             print(f"Error fetching player ID: {str(e)}")
