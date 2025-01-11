@@ -404,7 +404,9 @@ async def help_command(ctx, command_name=None):
         "Player Management": {
             "register": "Register player(s) for the tournament\n"
                        "Usage: !register username rank hunters [OTP]\n"
-                       "Example: !register PlayerName gold shiv/oath OTP",
+                       "Example: !register PlayerName#XXXX gold shiv/oath OTP\n"
+                       "Available ranks: bronze, silver, gold, plat, diamond, master, gm, legend\n"
+                       "Available hunters: brall, jin' ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void",
             "remove": "Remove a player from the tournament\n"
                      "Usage: !remove <username>",
             "players": "List all registered players and queue",
