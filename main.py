@@ -41,12 +41,16 @@ tournament_manager = Tournament()
 @bot.command(name='players')
 async def list_players(ctx):
     """Lists all players in the current tournament"""
-    tournament = tournament_manager.get_current_tournament()
-    if not tournament:
-        await ctx.send("No tournament running")
+    success, msg, tournament = tournament_manager.get_current_tournament()
+    if not success:
+        await ctx.send(msg)
         return
         
-    players = tournament_manager.get_players(tournament['id'])
+    success, msg, players = tournament_manager.get_players(tournament['id'])
+    if not success:
+        await ctx.send(msg)
+        return
+    
     if not players:
         await ctx.send("No players registered yet")
         return
@@ -161,19 +165,20 @@ async def start_tournament(ctx, *, date_string=None):
 @bot.command(name='current')
 async def current_tournament(ctx):
 	"""Shows information about the current tournament"""
-	tournament = tournament_manager.get_current_tournament()
-	if not tournament:
-		await ctx.send("No tournament running")
-	else:
-		info = f"Tournament Info:\n"
-		info += f"State: {tournament['state']}\n"
-		info += f"Start Date: {tournament['start_date']}\n"
-		info += f"Players: {tournament['player_count']}/{Tournament.MAX_PLAYERS}"
-		if tournament['queue_count'] > 0:
-			info += f" (Queue: {tournament['queue_count']})"
-		if tournament['average_rank'] and tournament['player_count'] > 0:
-			info += f"\nAverage Rank: {tournament['average_rank']}"
-		await ctx.send(info)
+	success, msg, tournament = tournament_manager.get_current_tournament()
+	if not success:
+		await ctx.send(msg)
+		return
+		
+	info = f"Tournament Info:\n"
+	info += f"State: {tournament['state']}\n"
+	info += f"Start Date: {tournament['start_date']}\n"
+	info += f"Players: {tournament['player_count']}/{Tournament.MAX_PLAYERS}"
+	if tournament['queue_count'] > 0:
+		info += f" (Queue: {tournament['queue_count']})"
+	if tournament['average_rank'] and tournament['player_count'] > 0:
+		info += f"\nAverage Rank: {tournament['average_rank']}"
+	await ctx.send(info)
 
 @bot.command(name='register')
 async def register_player(ctx, *, registration_text):
@@ -186,65 +191,82 @@ async def register_player(ctx, *, registration_text):
     registrations = registration_text.split('\n')
     responses = []
 
+    # Check if it's just a username with or without rank (but missing hunters)
+    if len(registrations[0].split()) < 3:
+        embed = discord.Embed(
+            title="Erreur lors de l'enregistrement",
+            description="Comment s'enregistrer au tournoi\n\n"
+                       "Utilisation: !register pseudo#XXXX rang chasseur [OTP]\n\n"
+                       "Rangs disponibles: bronze, silver, gold, plat, diamond, master, gm, legend\n"
+                       "Chasseur disponible (si plusieurs chasseurs les séparer par des /): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
+                       "OTP est facultatif, il permet d'éviter les doublons\n\n"
+                       "Exemples:\n!register unimork#0001 master myth OTP\n"
+                       "!register unimork#0001 gold shiv/oath\n",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+
     for reg in registrations:
         # Skip empty lines
         if not reg.strip():
             continue
 
-        # Split into words
         parts = reg.strip().split()
         if len(parts) < 3:
             responses.append(f"Invalid registration format: {reg}")
             continue
 
-        # Find the rank position by looking for a valid rank
-        rank_pos = -1
+        # Find the rank by looking for known rank values
+        rank_index = -1
         for i, part in enumerate(parts):
             if part.lower() in tournament_manager.VALID_RANKS:
-                rank_pos = i
+                rank_index = i
                 break
 
-        if rank_pos == -1:
+        if rank_index == -1:
             responses.append(f"No valid rank found in: {reg}")
             continue
 
         # Username is everything before the rank
-        username = ' '.join(parts[:rank_pos])
-        rank = parts[rank_pos]
-        # Hunters is everything after the rank
-        hunters = ' '.join(parts[rank_pos + 1:])
-        
-        message = tournament_manager.register_player(username, rank, hunters)
+        username = ' '.join(parts[:rank_index])
+        # Rank is at rank_index
+        rank = parts[rank_index]
+        # Hunters and OTP are everything after the rank
+        hunters = parts[rank_index + 1:]
+
+        success, message, _ = tournament_manager.register_player(username, rank, hunters)
         responses.append(message)
 
     # Send all responses in one message
     await ctx.send('\n'.join(responses))
 
 @bot.command(name='randomize')
-async def randomize_teams(ctx):
-    """Create balanced teams from checked-in players"""
-    result = tournament_manager.create_balanced_teams()
+async def randomize_teams(ctx):    
+    success, message, teams = tournament_manager.create_balanced_teams()
     
-    if not isinstance(result, list):
-        # If result is not a list of teams, it's an error message
-        await ctx.send(result)
+    if not success:
+        await ctx.send(message)
         return
     
-    # Save the teams
-    tournament_manager.save_teams(result)
+    print("save_teams")
+    success, save_msg, _ = tournament_manager.save_teams(teams)
+    print("save_teams done")
+    if not success:
+        await ctx.send(save_msg)
+        return
     
     # Create and send team information
     messages = []
     current_message = "**Teams have been created!**\n\n"
     
-    for team in result:
+    for team in teams:
         team_text = f"**Team {team['number']}** (Average Rank: {team['average_rank']})\n"
         for player in team['players']:
             otp_status = " (OTP)" if player['is_otp'] else ""
             team_text += f"• {player['username']} ({player['rank']}) - {player['hunters']}{otp_status}\n"
         team_text += "\n"
         
-        # Check if adding this team would exceed Discord's message limit
         if len(current_message + team_text) > 1900:
             messages.append(current_message)
             current_message = team_text
@@ -254,23 +276,21 @@ async def randomize_teams(ctx):
     if current_message:
         messages.append(current_message)
     
-    # Send all messages
     for msg in messages:
         await ctx.send(msg)
 
 @bot.command(name='teams')
 async def show_teams(ctx):
     """Shows the current teams"""
-    success, result = tournament_manager.get_teams()
-    
+    success, msg, teams = tournament_manager.get_teams()
     if not success:
-        await ctx.send(result)
+        await ctx.send(msg)
         return
 
     messages = []
     current_message = "**Current Teams:**\n\n"
     
-    for team in result:
+    for team in teams:
         team_text = f"**Team {team['number']}** (Average: {team['average_rank']})\n"
         for player in team['players']:
             otp_status = " (OTP)" if player['is_otp'] else ""
@@ -292,12 +312,25 @@ async def show_teams(ctx):
 @bot.command(name='end')
 async def end_tournament(ctx):
     """Ends the current tournament and computes final results"""
-    tournament_manager.end_tournament()
+    success, msg, _ = tournament_manager.end_tournament()
+    await ctx.send(msg)
 
 @bot.command(name='results')
-async def show_results(ctx, tournament_id):
+async def show_results(ctx, tournament_id=None):
     """Shows tournament results sorted by points, including team players"""
-    results = tournament_manager.get_tournament_results(tournament_id)
+    if tournament_id is None:
+        embed = discord.Embed(
+            title="Help: !results",
+            description="Shows tournament results sorted by points, including team players\nUsage: !results <tournament_id>",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+        
+    success, msg, results = tournament_manager.get_tournament_results(tournament_id)
+    if not success:
+        await ctx.send(msg)
+        return
     
     # Sort results by points in descending order
     sorted_results = sorted(results, key=lambda x: x['points'], reverse=True)
@@ -338,19 +371,19 @@ async def show_results(ctx, tournament_id):
 @bot.command(name='checkin')
 async def checkin_player(ctx, *, username):
     """Checks in a registered player for the tournament"""
-    success, message = tournament_manager.checkin_player(username)
+    success, message, _ = tournament_manager.checkin_player(username)
     await ctx.send(message)
 
 @bot.command(name='checkinphase')
 async def start_checkin(ctx):
     """Starts the check-in phase of the tournament"""
-    success, message = tournament_manager.start_checkin_phase()
+    success, message, _ = tournament_manager.start_checkin_phase()
     await ctx.send(message)
 
 @bot.command(name='swap')
 async def swap_players(ctx, player1: str, player2: str):
     """Swaps two players between teams"""
-    success, message = tournament_manager.swap_players(player1, player2)
+    success, message, _ = tournament_manager.swap_players(player1, player2)
     if success:
         await ctx.send(message)
         # Show updated teams after swap
@@ -361,13 +394,13 @@ async def swap_players(ctx, player1: str, player2: str):
 @bot.command(name='remove')
 async def remove_player(ctx, *, username):
     """Removes a player from the tournament"""
-    success, message = tournament_manager.remove_player(username)
+    success, message, _ = tournament_manager.remove_player(username)
     await ctx.send(message)
     
     # If player was removed successfully and was in a team, show updated teams
     if success and "removed from tournament" in message:
-        tournament = tournament_manager.get_current_tournament()
-        if tournament and tournament['state'] == TourneyState.RUNNING.value:
+        success, _, tournament = tournament_manager.get_current_tournament()
+        if success and tournament and tournament['state'] == TourneyState.RUNNING.value:
             await show_teams(ctx)
 
 @bot.command(name='queue')
@@ -402,11 +435,13 @@ async def help_command(ctx, command_name=None):
             "results": "Show tournament results\nUsage: !results <tournament_id>"
         },
         "Player Management": {
-            "register": "Register player(s) for the tournament\n"
-                       "Usage: !register username rank hunters [OTP]\n"
-                       "Example: !register PlayerName#XXXX gold shiv/oath OTP\n"
-                       "Available ranks: bronze, silver, gold, plat, diamond, master, gm, legend\n"
-                       "Available hunters: brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void",
+            "register": "Comment s'enregistrer au tournoi\n\n"
+                       "Utilisation: !register pseudo#XXXX rang chasseur [OTP]\n\n"
+                       "Rangs disponibles: bronze, silver, gold, plat, diamond, master, gm, legend\n"
+                       "Chasseur disponible (si plusieurs chasseurs les séparer par des /): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
+                        "OTP est facultatif, il permet d'éviter les doublons\n\n"
+                       "Exemples:\n!register unimork#0001 master myth OTP\n"
+                       "!register unimork#0001 gold shiv/oath\n",
             "remove": "Remove a player from the tournament\n"
                      "Usage: !remove <username>",
             "players": "List all registered players and queue",
@@ -416,7 +451,8 @@ async def help_command(ctx, command_name=None):
         "Check-in System": {
             "checkinphase": "Start the check-in phase",
             "checkin": "Check in a player\n"
-                      "Usage: !checkin PlayerName#XXXX"
+                      "Usage: !checkin PlayerName#XXXX",
+            "checkall": "Check in all registered players at once"
         },
         "Team Management": {
             "randomize": "Create balanced teams from checked-in players",
@@ -464,6 +500,12 @@ async def help_command(ctx, command_name=None):
             )
 
     await ctx.send(embed=embed)
+
+@bot.command(name='checkall')
+async def checkall_players(ctx):
+    """Checks in all registered players at once"""
+    success, message, _ = tournament_manager.checkall_players()
+    await ctx.send(message)
 
 # Run the bot
 try:

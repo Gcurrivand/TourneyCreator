@@ -34,7 +34,7 @@ class ValidHunter:
     HUNTERS = {
         'brall', 'jin', 'ghost', 'joule', 'myth', 'shiv', 'shrike', 
         'bishop', 'kingpin', 'felix', 'oath', 'elluna', 'zeph', 
-        'celeste', 'hudson', 'void'
+        'celeste', 'hudson', 'void', 'beebo'
     }
 
     @staticmethod
@@ -163,15 +163,18 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
+            
             self.set_tournament_matches(tournament['id'])
             self.set_tournament_state(tournament['id'], TourneyState.ENDED)
             
             conn.commit()
-            return True, "\nTournament ended!"
+            return True, "Tournament ended!", None
         except Exception as e:
             conn.rollback()
-            return False, f"Error ending tournament: {str(e)}"
+            return False, f"Error ending tournament: {str(e)}", None
         finally:
             conn.close()
 
@@ -181,64 +184,74 @@ class Tournament:
         
         try:
             c.execute("""
-                SELECT 
-                    t.id,
-                    t.start_date,
-                    t.end_date,
-                    t.state,
-                    (SELECT COUNT(*) FROM players WHERE tournament_id = t.id) as player_count,
-                    (SELECT COUNT(*) FROM queue WHERE tournament_id = t.id) as queue_count,
-                    COALESCE(
-                        (SELECT AVG(CAST(rank_weight AS FLOAT)) 
-                         FROM players 
-                         WHERE tournament_id = t.id), 
-                        0
-                    ) as avg_rank
-                FROM tournaments t 
+                SELECT t.id, t.start_date, t.end_date, t.state, t.number_of_games,
+                       COUNT(DISTINCT p.id) as player_count,
+                       COUNT(DISTINCT CASE WHEN p.state = 'registered' THEN p.id END) as registered_count,
+                       COUNT(DISTINCT q.id) as queue_count,
+                       AVG(CASE WHEN p.state = 'registered' THEN p.rank_weight END) as avg_rank
+                FROM tournaments t
+                LEFT JOIN players p ON p.tournament_id = t.id
+                LEFT JOIN queue q ON q.tournament_id = t.id
                 WHERE t.state != ?
+                GROUP BY t.id
+                ORDER BY t.id DESC
                 LIMIT 1
             """, (TourneyState.ENDED.value,))
             
             tournament = c.fetchone()
-            
             if not tournament:
-                return "No tournament running"
+                return False, "No tournament currently running", None
             
-            avg_rank_weight = tournament[6]
-            closest_rank = None
-            if avg_rank_weight > 0:
-                rounded_weight = round(avg_rank_weight)
-                closest_rank = Rank(rounded_weight).name.lower()
+            # Convert rank weight to rank name
+            avg_rank = None
+            if tournament[8]:  # avg_rank index
+                avg_rank_weight = round(tournament[8])
+                rank_names = {v: k for k, v in self.VALID_RANKS.items()}
+                avg_rank = rank_names.get(avg_rank_weight, "Unknown")
             
             result = {
-                "id": tournament[0],
-                "start_date": tournament[1],
-                "end_date": tournament[2],
-                "state": tournament[3],
-                "player_count": tournament[4],
-                "queue_count": tournament[5],
-                "average_rank": closest_rank
+                'id': tournament[0],
+                'start_date': tournament[1],
+                'end_date': tournament[2],
+                'state': tournament[3],
+                'number_of_games': tournament[4],
+                'player_count': tournament[5],
+                'registered_count': tournament[6],
+                'queue_count': tournament[7],
+                'average_rank': avg_rank
             }
-            return result
             
+            return True, "Tournament found", result
+        except Exception as e:
+            return False, f"Error fetching tournament: {str(e)}", None
         finally:
             conn.close()
 
     def validate_hunters(self, hunters_input):
+        """
+        Validates hunters. Can accept either a string or a list of hunters.
+        Returns (success, (hunters_list, is_otp))
+        """
         if not hunters_input:
-            return False, "No hunters provided"
-        hunters_list = hunters_input.split()
+            return False, "Pas de hunter: !register pseudo#XXXX rang chasseur [OTP]", None
+
+        # Convert to list if string input
+        if isinstance(hunters_input, str):
+            hunters_list = hunters_input.split()
+        else:
+            hunters_list = hunters_input
+
         is_otp = False
         if len(hunters_list) > 1 and hunters_list[-1].upper() == "OTP":
             is_otp = True
-            hunters_input = hunters_list[0]
+            hunters_list = hunters_list[:-1]
 
-        hunters = [h.lower() for h in hunters_input.split('/')]
+        hunters = [h.lower() for h in '/'.join(hunters_list).split('/')]
         
         invalid_hunters = [h for h in hunters if not ValidHunter.is_valid(h)]
         if invalid_hunters:
-            return False, f"Invalid hunters: {', '.join(invalid_hunters)}\nValid hunters: {', '.join(sorted(ValidHunter.get_all()))}"
-            
+            return False, f"Chasseur: {', '.join(invalid_hunters)} invalide\nChasseur disponibmes: {', '.join(sorted(ValidHunter.get_all()))}", None
+        
         return True, (hunters, is_otp)
 
     def validate_rank(self, rank):
@@ -252,66 +265,78 @@ class Tournament:
         return True, self.VALID_RANKS[rank_lower], rank_lower
 
     def register_player(self, username, rank, hunters_input):
-        """Register a player for the current tournament"""
-        # Validate rank
+        #if not self.get_player_id(username):
+        #    return False, "Ce pseudo n'existe pas dans la base de données de supervive", None
         is_valid_rank, rank_weight, normalized_rank = self.validate_rank(rank)
         if not is_valid_rank:
-            return f"Invalid rank: {rank}. Valid ranks are: {', '.join(self.VALID_RANKS.keys())}"
+            return False, f"Rang: {rank} invalide. Rangs disponibles: {', '.join(self.VALID_RANKS.keys())}\n La commande est: !register pseudo#XXXX rang chasseur [OTP]", None
 
-        # Validate hunters
         is_valid_hunters, result = self.validate_hunters(hunters_input)
         if not is_valid_hunters:
-            return result
+            return False, result, None
         hunters, is_otp = result
 
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
-            if not tournament:
-                return "No tournament running"
+            # Get current tournament
+            c.execute("""
+                SELECT id, state 
+                FROM tournaments 
+                WHERE state != ? 
+                ORDER BY id DESC 
+                LIMIT 1
+            """, (TourneyState.ENDED.value,))
             
-            if tournament['state'] not in [TourneyState.REGISTERING.value, TourneyState.CHECKIN.value]:
-                return "Tournament is not in registration phase"
+            tournament = c.fetchone()
+            if not tournament:
+                return False, "No tournament running", None
+            
+            tournament_id, tournament_state = tournament
+            
+            if tournament_state not in [TourneyState.REGISTERING.value, TourneyState.CHECKIN.value]:
+                return False, "Tournament is not in registration phase", None
 
+            # Check if player is already registered or in queue
             c.execute("""SELECT 
                             CASE 
                                 WHEN EXISTS (SELECT 1 FROM players WHERE tournament_id = ? AND LOWER(username) = LOWER(?)) THEN 'registered'
                                 WHEN EXISTS (SELECT 1 FROM queue WHERE tournament_id = ? AND LOWER(username) = LOWER(?)) THEN 'queued'
                                 ELSE 'none'
                             END""", 
-                     (tournament["id"], username, tournament["id"], username))
+                     (tournament_id, username, tournament_id, username))
             status = c.fetchone()[0]
             if status == 'registered':
-                conn.close()
-                return "Player already registered"
+                return False, "Player already registered", None
             elif status == 'queued':
-                conn.close()
-                return "Player already in queue"
+                return False, "Player already in queue", None
 
-            player_count = self.get_player_count(tournament["id"])
+            player_count = self.get_player_count(tournament_id)
 
             if player_count < self.MAX_PLAYERS:
                 # Register player with initial state
                 c.execute("""INSERT INTO players 
                             (tournament_id, username, rank, rank_weight, hunters, is_otp, state) 
                             VALUES (?, ?, ?, ?, ?, ?, 'registered')""",
-                         (tournament["id"], username, normalized_rank, rank_weight, 
+                         (tournament_id, username, normalized_rank, rank_weight, 
                           '/'.join(hunters), is_otp))
                 conn.commit()
                 otp_status = " (OTP)" if is_otp else ""
-                return f"Player {username} registered successfully with rank {normalized_rank} and hunters: {', '.join(hunters)}{otp_status}"
+                return True, f"Player {username} registered successfully with rank {normalized_rank} and hunters: {', '.join(hunters)}{otp_status}", None
             else:
                 # Add to queue
-                queue_position = self.get_next_queue_position(tournament["id"])
+                queue_position = self.get_next_queue_position(tournament_id)
                 c.execute("""INSERT INTO queue 
                             (tournament_id, username, rank, rank_weight, hunters, is_otp, queue_position) 
                             VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                         (tournament["id"], username, normalized_rank, rank_weight, 
+                         (tournament_id, username, normalized_rank, rank_weight, 
                           '/'.join(hunters), is_otp, queue_position))
                 conn.commit()
-                return f"Tournament full! Player {username} added to queue (position {queue_position})"
+                return True, f"Tournament full! Player {username} added to queue (position {queue_position})", None
+        except Exception as e:
+            conn.rollback()
+            return False, f"Error registering player: {str(e)}", None
         finally:
             conn.close()
 
@@ -335,99 +360,88 @@ class Tournament:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        c.execute("""
-            SELECT 
-                username, 
-                rank, 
-                hunters, 
-                is_otp, 
-                state,
-                queue_position,
-                CASE 
-                    WHEN state = 'registered' THEN state
-                    ELSE NULL
-                END as player_state
-            FROM (
+        try:
+            c.execute("""
                 SELECT 
-                    username, 
-                    rank, 
-                    hunters, 
-                    is_otp, 
-                    rank_weight,
-                    state,
-                    0 as queue_position
-                FROM players 
-                WHERE tournament_id = ?
-                
-                UNION ALL
-                
-                SELECT 
-                    username, 
-                    rank, 
-                    hunters, 
-                    is_otp, 
-                    rank_weight,
-                    NULL as state,
+                    username, rank, hunters, is_otp, state,
+                    queue_position,
+                    CASE 
+                        WHEN state = 'registered' THEN state
+                        ELSE NULL
+                    END as player_state
+                FROM (
+                    SELECT username, rank, hunters, is_otp, rank_weight,
+                        state, 0 as queue_position
+                    FROM players 
+                    WHERE tournament_id = ?
+                    
+                    UNION ALL
+                    
+                    SELECT username, rank, hunters, is_otp, rank_weight,
+                        NULL as state, queue_position
+                    FROM queue
+                    WHERE tournament_id = ?
+                )
+                ORDER BY 
+                    CASE WHEN state IS NOT NULL THEN 1 ELSE 2 END,
+                    rank_weight DESC,
                     queue_position
-                FROM queue
-                WHERE tournament_id = ?
-            )
-            ORDER BY 
-                CASE 
-                    WHEN state IS NOT NULL THEN 1 
-                    ELSE 2 
-                END,
-                rank_weight DESC,
-                queue_position
-        """, (tournament_id, tournament_id))
-        
-        players = c.fetchall()
-        conn.close()
-        return players
+            """, (tournament_id, tournament_id))
+            
+            players = c.fetchall()
+            return True, "Players retrieved successfully", players
+        except Exception as e:
+            return False, f"Error retrieving players: {str(e)}", None
+        finally:
+            conn.close()
 
     def get_registered_players(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        tournament = self.get_current_tournament()
-        
-        c.execute("""
-            SELECT 
-                username,
-                rank_weight,
-                hunters,
-                is_otp,
-                state
-            FROM players 
-            WHERE tournament_id = ? AND state = 'registered'
-        """, (tournament["id"],))
-        
-        players = c.fetchall()
-        conn.close()
-        return players
+        try:
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
+            
+            c.execute("""
+                SELECT username, rank_weight, hunters, is_otp, state
+                FROM players 
+                WHERE tournament_id = ? AND state = 'registered'
+            """, (tournament["id"],))
+            
+            players = c.fetchall()
+            return True, "Registered players retrieved", players
+        except Exception as e:
+            return False, f"Error retrieving registered players: {str(e)}", None
+        finally:
+            conn.close()
     
     def get_checked_players(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        tournament = self.get_current_tournament()
-        
-        c.execute("""
-            SELECT 
-                username,
-                rank_weight,
-                hunters,
-                is_otp,
-                state
-            FROM players 
-            WHERE tournament_id = ? AND state = 'checked'
-        """, (tournament["id"],))
-        
-        players = c.fetchall()
-        conn.close()
-        return players
+        try:
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
+            
+            c.execute("""
+                SELECT username, rank_weight, hunters, is_otp, state
+                FROM players 
+                WHERE tournament_id = ? AND state = 'checked'
+            """, (tournament["id"],))
+            
+            players = c.fetchall()
+            return True, "Checked players retrieved", players
+        except Exception as e:
+            return False, f"Error retrieving checked players: {str(e)}", None
+        finally:
+            conn.close()
 
     def set_tournament_state(self, tournament_id, new_state):
+        print(f"setting state to {new_state.value}")
+        print(f"tournament_id: {tournament_id}")
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
@@ -439,119 +453,159 @@ class Tournament:
             """, (new_state.value, tournament_id))
             
             conn.commit()
+            return True, f"Tournament state updated to {new_state.value}", None
         except Exception as e:
             conn.rollback()
-            return f"Error updating tournament state: {str(e)}"
+            return False, f"Error updating tournament state: {str(e)}", None
         finally:
             conn.close()
 
     def create_balanced_teams(self):
-        players = self.get_checked_players()
-        if not players:
-            return False, "No players registered"
-
-        total_players = len(players)
-        if total_players < self.MAX_PLAYERS:
-            return False, f"Not enough players. Need at least {self.MAX_PLAYERS} players."
-        player_data = []
-        for username, rank_weight, hunters, is_otp, state in players:
-            hunters_list = hunters.split('/')
-            player_data.append({
-                'username': username,
-                'rank_weight': rank_weight,
-                'hunters': hunters_list,
-                'is_otp': is_otp
-            })
-
-        num_teams = total_players // self.TEAM_SIZE
-
-        best_teams = None
-        best_variance = float('inf')
-        attempts = 100  # Number of randomization attempts
-
-        def calculate_team_variance(teams):
-            team_avgs = [sum(p['rank_weight'] for p in team) / len(team) for team in teams]
-            return max(team_avgs) - min(team_avgs)
-
-        for attempt in range(attempts):
-            # Create empty teams
-            current_teams = [[] for _ in range(num_teams)]
-            available_players = player_data.copy()
-            random.shuffle(available_players)
-
-            # Distribute players while checking only OTP conflicts
-            for player in available_players:
-                placed = False
-                # Try each team in random order
-                team_indices = list(range(num_teams))
-                random.shuffle(team_indices)
-                
-                for team_idx in team_indices:
-                    if len(current_teams[team_idx]) >= self.TEAM_SIZE:
-                        continue
-
-                    # Check OTP conflicts
-                    has_otp_conflict = False
-                    if player['is_otp']:
-                        for team_player in current_teams[team_idx]:
-                            if team_player['is_otp'] and any(h in player['hunters'] for h in team_player['hunters']):
-                                has_otp_conflict = True
-                                break
-                    
-                    if not has_otp_conflict:
-                        current_teams[team_idx].append(player)
-                        placed = True
-                        break
-                
-                if not placed:
-                    # If we couldn't place due to OTP conflicts, just put in first available team
-                    for team_idx in range(num_teams):
-                        if len(current_teams[team_idx]) < self.TEAM_SIZE:
-                            current_teams[team_idx].append(player)
-                            break
-
-            # Calculate variance only once all teams are formed
-            variance = calculate_team_variance(current_teams)
-            
-            if variance < best_variance:
-                best_variance = variance
-                best_teams = [team[:] for team in current_teams]
-                print(f"New best variance: {best_variance}")
-            attempt += 1
-
-        rank_names = {v: k.lower() for k, v in {r.name: r.value for r in Rank}.items()}
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
         
-        result = []
-        for i, team in enumerate(best_teams, 1):
-            team_avg = sum(p['rank_weight'] for p in team) / len(team)
-            team_info = {
-                'number': i,
-                'average_rank': rank_names[round(team_avg)],
-                'average_weight': team_avg,
-                'players': [{
-                    'username': p['username'],
-                    'rank': rank_names[p['rank_weight']],
-                    'rank_weight': p['rank_weight'],
-                    'hunters': '/'.join(p['hunters']),
-                    'is_otp': p['is_otp']
-                } for p in team]
-            }
-            result.append(team_info)
-        tournament = self.get_current_tournament()
-        self.set_tournament_state(tournament["id"], TourneyState.RUNNING)
+        try:
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, "No tournament running", None
+            if tournament['state'] != TourneyState.CHECKIN.value:
+                return False, "Tournament is not in checkin phase", None
+            
+            # Get count of all players and checked players
+            c.execute("""
+                SELECT 
+                    COUNT(*) as total_players,
+                    SUM(CASE WHEN state = 'checked' THEN 1 ELSE 0 END) as checked_players
+                FROM players 
+                WHERE tournament_id = ?
+            """, (tournament['id'],))
+            
+            result = c.fetchone()
+            total_players, checked_players = result
+            
+            if total_players == 0:
+                return False, "No players registered in the tournament", None
+            
+            if checked_players < total_players:
+                # Get list of unchecked players
+                c.execute("""
+                    SELECT username 
+                    FROM players 
+                    WHERE tournament_id = ? AND state != 'checked'
+                    ORDER BY username
+                """, (tournament['id'],))
+                unchecked = [row[0] for row in c.fetchall()]
+                return False, f"Not all players are checked in. Waiting for:\n{', '.join(unchecked)}", None
+            
+            success, msg, players = self.get_checked_players()
+            if not success:
+                return False, "No players checked", None
 
-        return result
+            total_players = len(players)
+            if total_players < self.MAX_PLAYERS:
+                return False, f"Not enough players. Need at least {self.MAX_PLAYERS} players.", None
+            player_data = []
+            for username, rank_weight, hunters, is_otp, state in players:
+                hunters_list = hunters.split('/')
+                player_data.append({
+                    'username': username,
+                    'rank_weight': rank_weight,
+                    'hunters': hunters_list,
+                    'is_otp': is_otp
+                })
+
+            num_teams = total_players // self.TEAM_SIZE
+
+            best_teams = None
+            best_variance = float('inf')
+            attempts = 100
+
+            def calculate_team_variance(teams):
+                team_avgs = [sum(p['rank_weight'] for p in team) / len(team) for team in teams]
+                return max(team_avgs) - min(team_avgs)
+
+            for attempt in range(attempts):
+                # Create empty teams
+                current_teams = [[] for _ in range(num_teams)]
+                available_players = player_data.copy()
+                random.shuffle(available_players)
+
+                # Distribute players while checking only OTP conflicts
+                for player in available_players:
+                    placed = False
+                    # Try each team in random order
+                    team_indices = list(range(num_teams))
+                    random.shuffle(team_indices)
+                    
+                    for team_idx in team_indices:
+                        if len(current_teams[team_idx]) >= self.TEAM_SIZE:
+                            continue
+
+                        # Check OTP conflicts
+                        has_otp_conflict = False
+                        if player['is_otp']:
+                            for team_player in current_teams[team_idx]:
+                                if team_player['is_otp'] and any(h in player['hunters'] for h in team_player['hunters']):
+                                    has_otp_conflict = True
+                                    break
+                        
+                        if not has_otp_conflict:
+                            current_teams[team_idx].append(player)
+                            placed = True
+                            break
+                    
+                    if not placed:
+                        # If we couldn't place due to OTP conflicts, just put in first available team
+                        for team_idx in range(num_teams):
+                            if len(current_teams[team_idx]) < self.TEAM_SIZE:
+                                current_teams[team_idx].append(player)
+                                break
+
+                # Calculate variance only once all teams are formed
+                variance = calculate_team_variance(current_teams)
+                
+                if variance < best_variance:
+                    best_variance = variance
+                    best_teams = [team[:] for team in current_teams]
+                    print(f"New best variance: {best_variance}")
+                attempt += 1
+
+            rank_names = {v: k.lower() for k, v in {r.name: r.value for r in Rank}.items()}
+            result = []
+            for i, team in enumerate(best_teams, 1):
+                team_avg = sum(p['rank_weight'] for p in team) / len(team)
+                team_info = {
+                    'number': i,
+                    'average_rank': rank_names[round(team_avg)],
+                    'average_weight': team_avg,
+                    'players': [{
+                        'username': p['username'],
+                        'rank': rank_names[p['rank_weight']],
+                        'rank_weight': p['rank_weight'],
+                        'hunters': '/'.join(p['hunters']),
+                        'is_otp': p['is_otp']
+                    } for p in team]
+                }
+                result.append(team_info)
+
+            return True, "Teams created successfully", result
+
+        except Exception as e:
+            print(f"Error creating balanced teams: {str(e)}")
+            return False, f"Error creating balanced teams: {str(e)}", None
 
     def save_teams(self, teams):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
             
             # Clear any existing teams for this tournament
-            c.execute("UPDATE players SET team_id = NULL WHERE tournament_id = ?", (tournament["id"],))
-            c.execute("DELETE FROM teams WHERE tournament_id = ?", (tournament["id"],))
+            c.execute("UPDATE players SET team_id = NULL WHERE tournament_id = ?", (tournament['id'],))
+            c.execute("DELETE FROM teams WHERE tournament_id = ?", (tournament['id'],))
 
             # Get rank weights for all players
             c.execute("""SELECT username, rank_weight FROM players 
@@ -560,7 +614,6 @@ class Tournament:
 
             # Save new teams
             for team_data in teams:
-                # Calculate average rank weight for the team using the stored weights
                 team_players = team_data['players']
                 avg_weight = sum(player_weights[p['username']] for p in team_players) / len(team_players)
                 
@@ -576,12 +629,19 @@ class Tournament:
                                SET team_id = ? 
                                WHERE tournament_id = ? AND username = ?""",
                              (team_id, tournament["id"], player['username']))
+
+            # Update tournament state to RUNNING
+            c.execute("""UPDATE tournaments 
+                        SET state = ? 
+                        WHERE id = ?""", 
+                     (TourneyState.RUNNING.value, tournament["id"]))
             
             conn.commit()
+            return True, "Teams saved and tournament started", None
             
         except Exception as e:
             conn.rollback()
-            return False, f"Error saving teams: {str(e)}"
+            return False, f"Error saving teams: {str(e)}", None
         finally:
             conn.close()
 
@@ -590,33 +650,28 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
             
-            # Get teams with their players
             c.execute("""
-                SELECT 
-                    t.team_number,
-                    t.average_rank_weight,
-                    p.username,
-                    p.rank,
-                    p.rank_weight,
-                    p.hunters,
-                    p.is_otp
+                SELECT t.team_number, t.average_rank_weight,
+                       p.username, p.rank, p.hunters, p.is_otp
                 FROM teams t
                 JOIN players p ON p.team_id = t.id
                 WHERE t.tournament_id = ?
                 ORDER BY t.team_number, p.rank_weight DESC
-            """, (tournament["id"],))
+            """, (tournament['id'],))
             
             rows = c.fetchall()
             if not rows:
-                return False, "No teams found"
+                return False, "No teams found", None
             
             teams = {}
             rank_names = {v: k.lower() for k, v in {r.name: r.value for r in Rank}.items()}
             
             for row in rows:
-                team_num, avg_weight, username, rank, rank_weight, hunters, is_otp = row
+                team_num, avg_weight, username, rank, hunters, is_otp = row
                 
                 if team_num not in teams:
                     teams[team_num] = {
@@ -632,8 +687,10 @@ class Tournament:
                     'is_otp': is_otp
                 })
             
-            return True, list(teams.values())
+            return True, "Teams retrieved successfully", list(teams.values())
             
+        except Exception as e:
+            return False, f"Error retrieving teams: {str(e)}", None
         finally:
             conn.close()
 
@@ -667,6 +724,7 @@ class Tournament:
                 return False, "Tournament not found"
             
             start_date, end_date, number_of_games, username = result
+            print(f"start_date: {start_date}, end_date: {end_date}, number_of_games: {number_of_games}, username: {username}")
             try:
                 start_timestamp = datetime.fromisoformat(start_date.replace('Z', '+00:00')).timestamp()
             except ValueError:
@@ -709,7 +767,7 @@ class Tournament:
                         break
                     
                     for match in matches:
-                        if match.get('queue_id', "customgame"):
+                        if match.get('queue_id') == "customgame":
                             try:
                                 match_time = datetime.fromisoformat(match['match_start'].replace('Z', '+00:00')).timestamp()
                                 if start_timestamp <= match_time <= end_timestamp:
@@ -721,15 +779,19 @@ class Tournament:
                                         self.save_match_results(tournament_id, match['match_id'], results)
                                         tournament_matches.append(match['match_id'])
                                         if len(tournament_matches) >= number_of_games:
-                                            return "Matches saved successfully"
+                                            return True, "Matches saved successfully"
                             except (ValueError, KeyError) as e:
                                 print(f"Error parsing match: {e}")
                                 continue
                     current_page += 1
                 
+                if tournament_matches:
+                    return True, f"Saved {len(tournament_matches)} matches"
+                return False, "No matches found in the specified time period"
+                
             except Exception as e:
-                return f"Error fetching matches: {str(e)}"
-             
+                return False, f"Error fetching matches: {str(e)}"
+            
         finally:
             conn.close()
             
@@ -838,61 +900,62 @@ class Tournament:
 
     def get_tournament_results(self, tournament_id):
         try:
-            conn = sqlite3.connect(self.db_path)
-            c = conn.cursor()
-            
-            # Get match results
             matches = self._get_match_results(tournament_id)
+            if not matches:
+                return False, "No matches found for this tournament", None
+            
             team_stats = self._compute_team_statistics(matches)
+            if not team_stats:
+                return False, "No team statistics available", None
             
-            # Get player information for each team
-            for team in team_stats:
-                c.execute("""
-                    SELECT p.username, p.rank
-                    FROM players p
-                    JOIN teams t ON p.team_id = t.id
-                    WHERE t.tournament_id = ? AND t.team_number = ?
-                    ORDER BY p.rank_weight DESC
-                """, (tournament_id, team['team_number']))
-                
-                team['players'] = [
-                    {'username': row[0], 'rank': row[1]}
-                    for row in c.fetchall()
-                ]
-            
-            return team_stats
-
+            return True, "Tournament results retrieved successfully", team_stats
         except Exception as e:
-            print(f"Error computing tournament results: {str(e)}")
-            return []
-        finally:
-            conn.close()
+            return False, f"Error retrieving tournament results: {str(e)}", None
 
     def _compute_team_statistics(self, match_results):
         team_stats = {}
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
         
-        for result in match_results:
-            team_number = result[0]
-            if team_number not in team_stats:
-                team_stats[team_number] = {
-                    'team_number': team_number,
-                    'points': 0,
-                    'damage_dealt': 0,
-                    'damage_taken': 0,
-                    'kills': 0,
-                    'deaths': 0,
-                    'matches': 0
-                }
-            
-            stats = team_stats[team_number]
-            stats['points'] += result[1]
-            stats['damage_dealt'] += result[2]
-            stats['damage_taken'] += result[3]
-            stats['kills'] += result[4]
-            stats['deaths'] += result[5]
-            stats['matches'] += 1
+        try:
+            for result in match_results:
+                team_number = result[0]
+                if team_number not in team_stats:
+                    # Get players for this team
+                    c.execute("""
+                        SELECT p.username, p.rank
+                        FROM players p
+                        JOIN teams t ON p.team_id = t.id
+                        WHERE t.team_number = ?
+                    """, (team_number,))
+                    players = [{'username': row[0], 'rank': row[1]} for row in c.fetchall()]
+                    
+                    team_stats[team_number] = {
+                        'team_number': team_number,
+                        'points': 0,
+                        'damage_dealt': 0,
+                        'damage_taken': 0,
+                        'kills': 0,
+                        'deaths': 0,
+                        'matches': 0,
+                        'players': players  # Add players to the stats
+                    }
+                
+                stats = team_stats[team_number]
+                stats['points'] += result[1]
+                stats['damage_dealt'] += result[2]
+                stats['damage_taken'] += result[3]
+                stats['kills'] += result[4]
+                stats['deaths'] += result[5]
+                stats['matches'] += 1
 
-        return list(team_stats.values())
+            return list(team_stats.values())
+            
+        except Exception as e:
+            print(f"Error computing team statistics: {str(e)}")
+            return None
+        finally:
+            conn.close()
 
     def checkin_player(self, username):
         """
@@ -903,12 +966,12 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
-            if not tournament:
-                return False, "No tournament running"
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, "No tournament running", None
             
             if tournament['state'] != TourneyState.CHECKIN.value:
-                return False, "Tournament is not in check-in phase"
+                return False, "Tournament is not in check-in phase", None
             
             c.execute("""
                 UPDATE players 
@@ -928,31 +991,34 @@ class Tournament:
                 result = c.fetchone()
                 
                 if not result:
-                    return False, f"Player {username} is not registered for this tournament"
+                    return False, f"Player {username} is not registered for this tournament", None
                 elif result[0] == 'checked':
-                    return False, f"Player {username} is already checked in"
+                    return False, f"Player {username} is already checked in", None
                 else:
-                    return False, f"Could not check in player {username}"
+                    return False, f"Could not check in player {username}", None
             else:
                 conn.commit()
-                return True, f"Player {username} has been checked in"
+                return True, f"Player {username} has been checked in", None
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}"
+            return False, f"An error occurred: {str(e)}", None
         finally:
             conn.close()
 
     def start_checkin_phase(self):
-        tournament = self.get_current_tournament()
-        if not tournament:
-            return False, "No tournament running"
+        success, msg, tournament = self.get_current_tournament()
+        if not success:
+            return False, "No tournament running", None
         
         if tournament['state'] != TourneyState.REGISTERING.value:
-            return False, "Tournament must be in registration phase to start check-ins"
+            return False, "Tournament must be in registration phase to start check-ins", None
         
-        self.set_tournament_state(tournament['id'], TourneyState.CHECKIN)
-        return True, "Check-in phase has started! Players can now check in."
+        success, msg, _ = self.set_tournament_state(tournament['id'], TourneyState.CHECKIN)
+        if not success:
+            return False, msg, None
+        
+        return True, "Check-in phase has started! Players can now check in.", None
 
     def swap_players(self, username1, username2):
         """
@@ -963,12 +1029,12 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
-            if not tournament:
-                return False, "No tournament running"
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, "No tournament running", None
             
             if tournament['state'] != TourneyState.RUNNING.value:
-                return False, "Teams haven't been created yet"
+                return False, "Teams haven't been created yet", None
             
             # Get team IDs for both players
             c.execute("""
@@ -987,7 +1053,7 @@ class Tournament:
                     missing_players.append(username1)
                 if username2.lower() not in found_players:
                     missing_players.append(username2)
-                return False, f"Player(s) not found: {', '.join(missing_players)}"
+                return False, f"Player(s) not found: {', '.join(missing_players)}", None
             
             # Get current team IDs
             team_id1 = next(p[1] for p in players if p[0].lower() == username1.lower())
@@ -1017,11 +1083,11 @@ class Tournament:
                 """, (team_id, team_id))
             
             conn.commit()
-            return True, f"Successfully swapped {username1} and {username2}"
+            return True, f"Successfully swapped {username1} and {username2}", None
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}"
+            return False, f"An error occurred: {str(e)}", None
         finally:
             conn.close()
 
@@ -1034,9 +1100,9 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
-            if not tournament:
-                return False, "No tournament running"
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, "No tournament running", None
             
             # Check if player exists and get their team info
             c.execute("""
@@ -1057,8 +1123,8 @@ class Tournament:
                 
                 if c.rowcount > 0:
                     conn.commit()
-                    return True, f"Player {username} removed from queue"
-                return False, f"Player {username} not found in tournament"
+                    return True, f"Player {username} removed from queue", None
+                return False, f"Player {username} not found in tournament", None
             
             player_id, team_id = player
             
@@ -1110,11 +1176,11 @@ class Tournament:
                     """, (tournament['id'], username))
             
             conn.commit()
-            return True, f"Player {username} removed from tournament"
+            return True, f"Player {username} removed from tournament", None
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}"
+            return False, f"An error occurred: {str(e)}", None
         finally:
             conn.close()
 
@@ -1123,19 +1189,19 @@ class Tournament:
         c = conn.cursor()
         
         try:
-            tournament = self.get_current_tournament()
-            if not tournament:
-                return False, "No tournament running", False
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, "No tournament running", None
             
             if username:
                 c.execute("""
-                    SELECT username, rank, rank_weight, hunters, is_otp 
+                    SELECT username, rank, rank_weight, hunters, is_otp, queue_position
                     FROM queue 
                     WHERE tournament_id = ? AND LOWER(username) = LOWER(?)
                 """, (tournament['id'], username))
             else:
                 c.execute("""
-                    SELECT username, rank, rank_weight, hunters, is_otp 
+                    SELECT username, rank, rank_weight, hunters, is_otp, queue_position
                     FROM queue 
                     WHERE tournament_id = ? 
                     ORDER BY queue_position 
@@ -1144,13 +1210,13 @@ class Tournament:
 
             queued_player = c.fetchone()
             if not queued_player:
-                return False, "No players in queue", False
+                return False, "No players in queue", None
 
-            username, rank, rank_weight, hunters, is_otp = queued_player
+            username, rank, rank_weight, hunters, is_otp, queue_position = queued_player
             team_id = None
-            team_updated = False
+            team_number = None
 
-            # If teams exist, check for empty spots
+            # If tournament is running, find a team with space
             if tournament['state'] == TourneyState.RUNNING.value:
                 c.execute("""
                     SELECT t.id, t.team_number, COUNT(p.id) as player_count
@@ -1163,11 +1229,13 @@ class Tournament:
                     LIMIT 1
                 """, (tournament['id'], self.TEAM_SIZE))
                 
-                incomplete_team = c.fetchone()
-                if incomplete_team:
-                    team_id = incomplete_team[0]
-                    team_number = incomplete_team[1]
-                    team_updated = True
+                team = c.fetchone()
+                print(f"team: {team}")
+                if team:
+                    team_id = team[0]
+                    team_number = team[1]
+                else:
+                    return False, "No available team spots", None
 
             # Add player to players table
             initial_state = 'checked' if tournament['state'] == TourneyState.RUNNING.value else 'registered'
@@ -1183,6 +1251,7 @@ class Tournament:
                 WHERE tournament_id = ? AND LOWER(username) = LOWER(?)
             """, (tournament['id'], username))
 
+            # Update team average rank if assigned to a team
             if team_id:
                 c.execute("""
                     UPDATE teams 
@@ -1199,10 +1268,47 @@ class Tournament:
                 message = f"Player {username} promoted from queue"
 
             conn.commit()
-            return True, message, team_updated
+            return True, message, team_id is not None
 
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", False
+            return False, f"An error occurred: {str(e)}", None
+        finally:
+            conn.close()
+
+    def checkall_players(self):
+        """
+        Checks in all registered players at once.
+        Returns tuple (success, message, data)
+        """
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        try:
+            success, msg, tournament = self.get_current_tournament()
+            if not success:
+                return False, msg, None
+            
+            if tournament['state'] != TourneyState.CHECKIN.value:
+                return False, "Tournament is not in check-in phase", None
+            
+            c.execute("""
+                UPDATE players 
+                SET state = 'checked' 
+                WHERE tournament_id = ? 
+                AND state = 'registered'
+            """, (tournament['id'],))
+            
+            updated_count = c.rowcount
+            
+            if updated_count == 0:
+                return False, "No players to check in", None
+            
+            conn.commit()
+            return True, f"{updated_count} players have been checked in", None
+            
+        except Exception as e:
+            conn.rollback()
+            return False, f"An error occurred: {str(e)}", None
         finally:
             conn.close()
