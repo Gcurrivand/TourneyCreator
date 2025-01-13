@@ -396,12 +396,12 @@ async def help_command(ctx, command_name=None):
         },
         "Player Management": {
             "register": "Comment s'enregistrer au tournoi\n\n"
-                       "Utilisation: !register pseudo#XXXX rang chasseur [OTP]\n\n"
+                       "Utilisation: !register pseudo#XXXX rang chasseurs\n\n"
                        "Rangs disponibles: bronze, silver, gold, plat, diamond, master, gm, legend\n"
-                       "Chasseur disponible (si plusieurs chasseurs les séparer par des /): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
-                        "OTP est facultatif, il permet d'éviter les doublons\n\n"
-                       "Exemples:\n!register unimork#0001 master myth OTP\n"
-                       "!register unimork#0001 gold shiv/oath\n",
+                       "Chasseur disponible (si plusieurs chasseurs les séparer par des espaces): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
+                        "OTP automatique si un seul chasseur est choisi\n\n"
+                       "Exemples:\n!register unimork#0001 master myth\n"
+                       "!register unimork#0001 gold shiv oath\n",
             "remove": "Remove a player from the tournament\n"
                      "Usage: !remove <username>",
             "players": "List all registered players and queue",
