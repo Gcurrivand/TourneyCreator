@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
-from tournament import Tournament, TourneyState
+from tournament import Tournament, TourneyState, ValidHunter
 from datetime import datetime
 import sqlite3
 
@@ -109,13 +109,6 @@ async def on_message(message):
 async def on_error(event, *args, **kwargs):
 	print(f'Error in {event}:', exc_info=True)
 
-@bot.event
-async def on_command_error(ctx, error):
-	if isinstance(error, commands.CommandNotFound):
-		await ctx.send("Command not found. Try !help to see available commands.")
-	else:
-		await ctx.send(f"An error occurred: {str(error)}")
-
 @bot.command(name='start')
 async def start_tournament(ctx, *, date_string=None):
     """
@@ -181,65 +174,32 @@ async def current_tournament(ctx):
 	await ctx.send(info)
 
 @bot.command(name='register')
-async def register_player(ctx, *, registration_text):
-    """Registers multiple players for the current tournament"""
-    if not registration_text:
-        await ctx.send("Please provide registrations in format: !register username rank hunters [OTP]")
-        return
-
-    # Split the text by newlines to handle multiple registrations
-    registrations = registration_text.split('\n')
-    responses = []
-
-    # Check if it's just a username with or without rank (but missing hunters)
-    if len(registrations[0].split()) < 3:
+async def register_player(ctx, username: str, rank: str, *hunters: str):
+    normalized_hunters = [ValidHunter.normalize_string(h) for h in hunters]
+    if not username or not rank or len(normalized_hunters) == 0:
         embed = discord.Embed(
-            title="Erreur lors de l'enregistrement",
-            description="Comment s'enregistrer au tournoi\n\n"
-                       "Utilisation: !register pseudo#XXXX rang chasseur [OTP]\n\n"
+            title="Comment s'enregistrer au tournoi",
+            description=""
+                       "Utilisation: !register pseudo#XXXX rang chasseurs\n\n"
                        "Rangs disponibles: bronze, silver, gold, plat, diamond, master, gm, legend\n"
-                       "Chasseur disponible (si plusieurs chasseurs les séparer par des /): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
-                       "OTP est facultatif, il permet d'éviter les doublons\n\n"
-                       "Exemples:\n!register unimork#0001 master myth OTP\n"
-                       "!register unimork#0001 gold shiv/oath\n",
+                       "Chasseur disponible (si plusieurs chasseurs les séparer par des espaces): brall, jin, ghost, joule, myth, shiv, shrike, bishop, kingpin, felix, oath, elluna, zeph, celeste, hudson, void, beebo\n\n"
+                       "Si un seul chasseur est choisi, alors considéré comme un OTP\n\n"
+                       "Exemples:\n!register unimork#0001 master myth\n"
+                       "!register unimork#0001 gold shiv oath\n",
             color=discord.Color.blue()
         )
         await ctx.send(embed=embed)
         return
 
-    for reg in registrations:
-        # Skip empty lines
-        if not reg.strip():
-            continue
-
-        parts = reg.strip().split()
-        if len(parts) < 3:
-            responses.append(f"Invalid registration format: {reg}")
-            continue
-
-        # Find the rank by looking for known rank values
-        rank_index = -1
-        for i, part in enumerate(parts):
-            if part.lower() in tournament_manager.VALID_RANKS:
-                rank_index = i
-                break
-
-        if rank_index == -1:
-            responses.append(f"No valid rank found in: {reg}")
-            continue
-
-        # Username is everything before the rank
-        username = ' '.join(parts[:rank_index])
-        # Rank is at rank_index
-        rank = parts[rank_index]
-        # Hunters and OTP are everything after the rank
-        hunters = parts[rank_index + 1:]
-
-        success, message, _ = tournament_manager.register_player(username, rank, hunters)
-        responses.append(message)
-
-    # Send all responses in one message
-    await ctx.send('\n'.join(responses))
+    success, message, _ = tournament_manager.register_player(username, rank, normalized_hunters)
+    await ctx.send(message)
+    
+@register_player.error
+async def register_player_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"Il manque des paramètres dans la commande\nUtilisation: !register pseudo#XXXX rang chasseurs")
+    else:
+        await ctx.send(f"An unexpected error occurred: {error}")
 
 @bot.command(name='randomize')
 async def randomize_teams(ctx):    
@@ -513,4 +473,4 @@ try:
 except discord.errors.LoginFailure:
 	print("Failed to login: Invalid token")
 except Exception as e:
-	print(f"An error occurred: {str(e)}")
+	print(f"command error: {str(e)}")

@@ -227,58 +227,33 @@ class Tournament:
         finally:
             conn.close()
 
-    def validate_hunters(self, hunters_input):
-        """
-        Validates hunters. Can accept either a string or a list of hunters.
-        Returns (success, (hunters_list, is_otp))
-        """
-        if not hunters_input:
-            return False, "Pas de hunter: !register pseudo#XXXX rang chasseur [OTP]", None
-
-        # Convert to list if string input
-        if isinstance(hunters_input, str):
-            hunters_list = hunters_input.split()
-        else:
-            hunters_list = hunters_input
-
-        is_otp = False
-        if len(hunters_list) > 1 and hunters_list[-1].upper() == "OTP":
-            is_otp = True
-            hunters_list = hunters_list[:-1]
-
-        hunters = [h.lower() for h in '/'.join(hunters_list).split('/')]
-        
-        invalid_hunters = [h for h in hunters if not ValidHunter.is_valid(h)]
-        if invalid_hunters:
-            return False, f"Chasseur: {', '.join(invalid_hunters)} invalide\nChasseur disponibmes: {', '.join(sorted(ValidHunter.get_all()))}", None
-        
-        return True, (hunters, is_otp)
+    def validate_hunters(self, hunters):
+        if not hunters:
+            return False, "Pas de chasseur: !register pseudo#XXXX rang chasseur"   
+        invalid_hunters = [h for h in hunters if h not in ValidHunter.HUNTERS]
+        if len(invalid_hunters) > 0:
+            return False, f"Chasseur: {', '.join(invalid_hunters)} invalide\nChasseur disponibles: {', '.join(sorted(ValidHunter.get_all()))}\nSéparé par des espaces\nSi le pseudo à un espace alors écrire entre guillemets, exemple \"unimork#0001\"\nOTP automatique si 1 seul chasseur"
+        return True, hunters
 
     def validate_rank(self, rank):
-        """
-        Validates a rank and returns its weight.
-        Returns tuple (is_valid, rank_weight, normalized_rank)
-        """
         rank_lower = rank.lower()
         if rank_lower not in self.VALID_RANKS:
             return False, 0, None
         return True, self.VALID_RANKS[rank_lower], rank_lower
 
-    def register_player(self, username, rank, hunters_input):
-        #if not self.get_player_id(username):
-        #    return False, "Ce pseudo n'existe pas dans la base de données de supervive", None
+    def register_player(self, username, rank, hunters_entry):
+        print(f"register_player: {username} {rank} {hunters_entry}")
         is_valid_rank, rank_weight, normalized_rank = self.validate_rank(rank)
         if not is_valid_rank:
-            return False, f"Rang: {rank} invalide. Rangs disponibles: {', '.join(self.VALID_RANKS.keys())}\n La commande est: !register pseudo#XXXX rang chasseur [OTP]", None
+            return False, f"Rang: {rank} invalide.\nRangs disponibles: {', '.join(self.VALID_RANKS.keys())}\nSi le pseudo à un espace alors écrire entre guillemets, exemple \"unimork#0001\"", None
 
-        is_valid_hunters, result = self.validate_hunters(hunters_input)
+        is_valid_hunters, hunters = self.validate_hunters(hunters_entry)
         if not is_valid_hunters:
-            return False, result, None
-        hunters, is_otp = result
+            return False, hunters, None
+        is_otp = len(hunters) == 1;
 
         conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        
+        c = conn.cursor()   
         try:
             # Get current tournament
             c.execute("""
@@ -384,8 +359,8 @@ class Tournament:
                 )
                 ORDER BY 
                     CASE WHEN state IS NOT NULL THEN 1 ELSE 2 END,
-                    rank_weight DESC,
-                    queue_position
+                    username,
+                    queue_position DESC
             """, (tournament_id, tournament_id))
             
             players = c.fetchall()
@@ -1007,7 +982,7 @@ class Tournament:
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", None
+            return False, f"checkin error: {str(e)}", None
         finally:
             conn.close()
 
@@ -1092,7 +1067,7 @@ class Tournament:
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", None
+            return False, f"swap error: {str(e)}", None
         finally:
             conn.close()
 
@@ -1185,7 +1160,7 @@ class Tournament:
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", None
+            return False, f"remove error: {str(e)}", None
         finally:
             conn.close()
 
@@ -1277,7 +1252,7 @@ class Tournament:
 
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", None
+            return False, f"promote error: {str(e)}", None
         finally:
             conn.close()
 
@@ -1314,6 +1289,6 @@ class Tournament:
             
         except Exception as e:
             conn.rollback()
-            return False, f"An error occurred: {str(e)}", None
+            return False, f"checkall error: {str(e)}", None
         finally:
             conn.close()
