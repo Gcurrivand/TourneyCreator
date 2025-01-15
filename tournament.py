@@ -884,7 +884,7 @@ class Tournament:
             if not matches:
                 return False, "No matches found for this tournament", None
             
-            team_stats = self._compute_team_statistics(matches)
+            team_stats = self._compute_team_statistics(matches, tournament_id)
             if not team_stats:
                 return False, "No team statistics available", None
             
@@ -892,7 +892,7 @@ class Tournament:
         except Exception as e:
             return False, f"Error retrieving tournament results: {str(e)}", None
 
-    def _compute_team_statistics(self, match_results):
+    def _compute_team_statistics(self, match_results, tournament_id):   
         team_stats = {}
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -906,8 +906,8 @@ class Tournament:
                         SELECT p.username, p.rank
                         FROM players p
                         JOIN teams t ON p.team_id = t.id
-                        WHERE t.team_number = ?
-                    """, (team_number,))
+                        WHERE t.team_number = ? AND p.tournament_id = ?
+                    """, (team_number, tournament_id))
                     players = [{'username': row[0], 'rank': row[1]} for row in c.fetchall()]
                     
                     team_stats[team_number] = {
