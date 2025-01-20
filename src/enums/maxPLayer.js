@@ -23,6 +23,7 @@ const MaxPlayer = {
     }
 };
 
+
 Object.freeze(MaxPlayer);
 
 module.exports = MaxPlayer;
