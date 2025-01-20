@@ -1,8 +1,8 @@
 const { Client, Events, GatewayIntentBits, Collection } = require('discord.js');
-require('dotenv').config({ path: '../.env' });
-const { isAuthorizedUser } = require('./utils/auth');
-const fs = require('node:fs');
 const path = require('node:path');
+const fs = require('node:fs');
+require('dotenv').config({ path: path.join(__dirname, '../.env') });
+const { isAuthorizedUser } = require('./utils/auth');
 require('reflect-metadata');
 const AppDataSource = require('./database/datasource');
 
