@@ -49,7 +49,6 @@ function getCommandFiles(dir) {
         const stat = fs.statSync(filePath);
 
         if (stat.isDirectory()) {
-            // Recursively get files from subdirectories
             commandFiles.push(...getCommandFiles(filePath));
         } else if (file.endsWith('.js')) {
             commandFiles.push(filePath);

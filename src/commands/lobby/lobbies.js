@@ -26,9 +26,12 @@ module.exports = {
                 });
             }
 
-            const embed = new EmbedBuilder()
+            const embeds = [new EmbedBuilder()
                 .setTitle(`Lobbies for ${event.name}`)
-                .setColor('#0099ff');
+                .setColor('#0099ff')];
+
+            let currentEmbed = embeds[0];
+            let currentEmbedLength = currentEmbed.data.title.length;
 
             for (const lobby of event.lobbies) {
                 const sortedPlayers = [...lobby.players].sort((a, b) => {
@@ -90,15 +93,30 @@ module.exports = {
                     const fieldName = index === 0 
                         ? `${lobby.name} (${lobby.players.length} players)`
                         : ` `;
-                    embed.addFields({
+                    const fieldValue = chunk || 'No players';
+                    const fieldLength = fieldName.length + fieldValue.length;
+
+                    // Create new embed if adding this field would exceed limits
+                    if (currentEmbedLength + fieldLength > 6000) {
+                        const newEmbed = new EmbedBuilder()
+                            .setTitle(`Lobbies for ${event.name} (cont.)`)
+                            .setColor('#0099ff');
+                        embeds.push(newEmbed);
+                        currentEmbed = newEmbed;
+                        currentEmbedLength = newEmbed.data.title.length;
+                    }
+
+                    currentEmbed.addFields({
                         name: fieldName,
-                        value: chunk || 'No players',
+                        value: fieldValue,
                         inline: false
                     });
+                    
+                    currentEmbedLength += fieldLength;
                 });
             }
 
-            await interaction.editReply({ embeds: [embed] });
+            await interaction.editReply({ embeds: embeds });
 
         } catch (error) {
             console.error('Error in lobbies command:', error);
